@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/tidwall/btree"
 	"github.com/tidwall/match"
@@ -776,27 +778,23 @@ func NewReader(rd io.Reader) *Reader {
 	}
 }
 
-func parseInt(b []byte) (int, bool) {
-	if len(b) == 1 && b[0] >= '0' && b[0] <= '9' {
-		return int(b[0] - '0'), true
-	}
-	var n int
-	var sign bool
-	var i int
-	if len(b) > 0 && b[0] == '-' {
-		sign = true
-		i++
-	}
-	for ; i < len(b); i++ {
-		if b[i] < '0' || b[i] > '9' {
-			return 0, false
+// hot path for 1 or 2 byte integers
+func parseSmallInt(b []byte) (int, bool) {
+	if len(b) == 1 {
+		if b[0] >= '0' && b[0] <= '9' {
+			return int(b[0] - '0'), true
 		}
-		n = n*10 + int(b[i]-'0')
+	} else if len(b) == 2 {
+		if b[0] >= '0' && b[0] <= '9' && b[1] >= '0' && b[1] <= '9' {
+			return int(b[0]-'0')*10 + int(b[1]-'0'), true
+		}
 	}
-	if sign {
-		n *= -1
-	}
-	return n, true
+	return 0, false
+}
+
+func parseInt(b []byte) (int, bool) {
+	i, err := strconv.Atoi(unsafe.String(unsafe.SliceData(b), len(b)))
+	return i, err == nil
 }
 
 func (rd *Reader) readCommands(leftover *int) ([]Command, error) {

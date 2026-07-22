@@ -237,7 +237,10 @@ func ReadNextCommand(packet []byte, argsbuf [][]byte) (
 				if packet[i-1] != '\r' {
 					return false, args[:0], Redis, packet, errInvalidMultiBulkLength
 				}
-				count, ok := parseInt(packet[s : i-1])
+				count, ok := parseSmallInt(packet[s : i-1])
+				if !ok {
+					count, ok = parseInt(packet[s : i-1])
+				}
 				if !ok || count < 0 {
 					return false, args[:0], Redis, packet, errInvalidMultiBulkLength
 				}
@@ -260,7 +263,10 @@ func ReadNextCommand(packet []byte, argsbuf [][]byte) (
 							if packet[i-1] != '\r' {
 								return false, args[:0], Redis, packet, errInvalidBulkLength
 							}
-							n, ok := parseInt(packet[s : i-1])
+							n, ok := parseSmallInt(packet[s : i-1])
+							if !ok {
+								n, ok = parseInt(packet[s : i-1])
+							}
 							if !ok || count <= 0 {
 								return false, args[:0], Redis, packet, errInvalidBulkLength
 							}
@@ -343,6 +349,7 @@ func readTile38Command(packet []byte, argsbuf [][]byte) (
 	}
 	return false, args[:0], Tile38, packet, nil
 }
+
 func readTelnetCommand(packet []byte, argsbuf [][]byte) (
 	complete bool, args [][]byte, kind Kind, leftover []byte, err error,
 ) {
