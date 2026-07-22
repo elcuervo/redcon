@@ -778,20 +778,6 @@ func NewReader(rd io.Reader) *Reader {
 	}
 }
 
-// hot path for 1 or 2 byte integers
-func parseSmallInt(b []byte) (int, bool) {
-	if len(b) == 1 {
-		if b[0] >= '0' && b[0] <= '9' {
-			return int(b[0] - '0'), true
-		}
-	} else if len(b) == 2 {
-		if b[0] >= '0' && b[0] <= '9' && b[1] >= '0' && b[1] <= '9' {
-			return int(b[0]-'0')*10 + int(b[1]-'0'), true
-		}
-	}
-	return 0, false
-}
-
 func parseInt(b []byte) (int, bool) {
 	i, err := strconv.Atoi(unsafe.String(unsafe.SliceData(b), len(b)))
 	return i, err == nil

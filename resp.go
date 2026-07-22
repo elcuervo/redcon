@@ -237,10 +237,7 @@ func ReadNextCommand(packet []byte, argsbuf [][]byte) (
 				if packet[i-1] != '\r' {
 					return false, args[:0], Redis, packet, errInvalidMultiBulkLength
 				}
-				count, ok := parseSmallInt(packet[s : i-1])
-				if !ok {
-					count, ok = parseInt(packet[s : i-1])
-				}
+				count, ok := parseInt(packet[s : i-1])
 				if !ok || count < 0 {
 					return false, args[:0], Redis, packet, errInvalidMultiBulkLength
 				}
@@ -263,10 +260,7 @@ func ReadNextCommand(packet []byte, argsbuf [][]byte) (
 							if packet[i-1] != '\r' {
 								return false, args[:0], Redis, packet, errInvalidBulkLength
 							}
-							n, ok := parseSmallInt(packet[s : i-1])
-							if !ok {
-								n, ok = parseInt(packet[s : i-1])
-							}
+							n, ok := parseInt(packet[s : i-1])
 							if !ok || count <= 0 {
 								return false, args[:0], Redis, packet, errInvalidBulkLength
 							}
