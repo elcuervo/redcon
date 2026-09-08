@@ -251,6 +251,112 @@ func TestAppendBulkUint(t *testing.T) {
 	}
 }
 
+func TestRESP3Parse(t *testing.T) {
+	tests := []struct {
+		payload string
+		typ     Type
+		count   int
+		data    string
+	}{
+		{"_\r\n", Null, 0, ""},
+		{",1.23\r\n", Double, 0, "1.23"},
+		{"#t\r\n", Boolean, 0, "t"},
+		{"#f\r\n", Boolean, 0, "f"},
+		{"(3492890328409238509324850943850943825024385\r\n", BigNumber, 0,
+			"3492890328409238509324850943850943825024385"},
+		{"=15\r\ntxt:Some string\r\n", Verbatim, 0, "txt:Some string"},
+		{"!21\r\nSYNTAX invalid syntax\r\n", BlobError, 0, "SYNTAX invalid syntax"},
+		{"%2\r\n+first\r\n:1\r\n+second\r\n:2\r\n", Map, 2,
+			"+first\r\n:1\r\n+second\r\n:2\r\n"},
+		{"~3\r\n+orange\r\n+apple\r\n:1\r\n", Set, 3,
+			"+orange\r\n+apple\r\n:1\r\n"},
+		{">3\r\n+message\r\n+somechannel\r\n+hi\r\n", Push, 3,
+			"+message\r\n+somechannel\r\n+hi\r\n"},
+		{"|1\r\n+ttl\r\n:3600\r\n", Attribute, 1, "+ttl\r\n:3600\r\n"},
+		{">2\r\n,1.5\r\n#t\r\n", Push, 2, ",1.5\r\n#t\r\n"},
+	}
+	for _, tt := range tests {
+		n, resp := ReadNextRESP([]byte(tt.payload))
+		if n != len(tt.payload) {
+			t.Fatalf("payload %q: expected n=%d, got %d", tt.payload, len(tt.payload), n)
+		}
+		if resp.Type != tt.typ {
+			t.Fatalf("payload %q: expected type %d, got %d", tt.payload, tt.typ, resp.Type)
+		}
+		if resp.Count != tt.count {
+			t.Fatalf("payload %q: expected count %d, got %d", tt.payload, tt.count, resp.Count)
+		}
+		if string(resp.Data) != tt.data {
+			t.Fatalf("payload %q: expected data %q, got %q", tt.payload, tt.data, resp.Data)
+		}
+		if string(resp.Raw) != tt.payload {
+			t.Fatalf("payload %q: expected raw %q, got %q", tt.payload, tt.payload, resp.Raw)
+		}
+	}
+
+	bad := []string{
+		"_\r",                 // missing LF
+		"_",                   // truncated
+		",",                   // truncated
+		"=5\r\ntxt:x",         // truncated payload
+		"%2\r\n+first\r\n",   // truncated map
+		"~x\r\n",              // invalid set count
+		"|2\r\n+first\r\n:1\r\n", // attribute declares 2 pairs but has 1
+	}
+	for _, p := range bad {
+		n, resp := ReadNextRESP([]byte(p))
+		if n > 0 || resp.Type != 0 {
+			t.Fatalf("expected bad for %q, got n=%d resp=%v", p, n, resp)
+		}
+	}
+}
+
+func TestRESP3Helpers(t *testing.T) {
+	_, r := ReadNextRESP([]byte(",1.5\r\n"))
+	if r.Double() != 1.5 {
+		t.Fatalf("expected double 1.5, got %v", r.Double())
+	}
+	_, r = ReadNextRESP([]byte("#t\r\n"))
+	if !r.Bool() {
+		t.Fatalf("expected bool true")
+	}
+	_, r = ReadNextRESP([]byte("#f\r\n"))
+	if r.Bool() {
+		t.Fatalf("expected bool false")
+	}
+}
+
+func TestAppendRESP3(t *testing.T) {
+	tests := []struct {
+		name string
+		got  []byte
+		exp  string
+	}{
+		{"Null3", AppendNull3(nil), "_\r\n"},
+		{"Double", AppendDouble(nil, 9.123192839), ",9.123192839\r\n"},
+		{"BoolTrue", AppendBool(nil, true), "#t\r\n"},
+		{"BoolFalse", AppendBool(nil, false), "#f\r\n"},
+		{"BigNumber", AppendBigNumber(nil,
+			"3492890328409238509324850943850943825024385"),
+			"(3492890328409238509324850943850943825024385\r\n"},
+		{"Verbatim", AppendVerbatim(nil, "txt", "Some string"),
+			"=15\r\ntxt:Some string\r\n"},
+		{"BlobError", AppendBlobError(nil, "SYNTAX invalid syntax"),
+			"!21\r\nSYNTAX invalid syntax\r\n"},
+		{"Map", AppendMap(nil, 2), "%2\r\n"},
+		{"Set", AppendSet(nil, 3), "~3\r\n"},
+		{"Push", AppendPush(nil, 3), ">3\r\n"},
+		{"Attribute", AppendAttribute(nil, 1), "|1\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if string(tt.got) != tt.exp {
+				t.Fatalf("expected '%s', got '%s'", tt.exp, tt.got)
+			}
+		})
+	}
+}
+
 func TestArrayMap(t *testing.T) {
 	var dst []byte
 	dst = AppendArray(dst, 4)

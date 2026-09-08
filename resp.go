@@ -13,11 +13,22 @@ type Type byte
 
 // Various RESP kinds
 const (
-	Integer = ':'
-	String  = '+'
-	Bulk    = '$'
-	Array   = '*'
-	Error   = '-'
+	Integer   = ':'
+	String    = '+'
+	Bulk      = '$'
+	Array     = '*'
+	Error     = '-'
+	// RESP3 kinds
+	Null      = '_'
+	Double    = ','
+	Boolean   = '#'
+	BigNumber = '('
+	Verbatim  = '='
+	BlobError = '!'
+	Map       = '%'
+	Set       = '~'
+	Push      = '>'
+	Attribute = '|'
 )
 
 type RESP struct {
@@ -55,6 +66,15 @@ func (r RESP) Int() int64 {
 func (r RESP) Float() float64 {
 	x, _ := strconv.ParseFloat(r.String(), 10)
 	return x
+}
+
+func (r RESP) Double() float64 {
+	x, _ := strconv.ParseFloat(r.String(), 64)
+	return x
+}
+
+func (r RESP) Bool() bool {
+	return len(r.Data) == 1 && r.Data[0] == 't'
 }
 
 // Map returns a key/value map of an Array.
@@ -112,7 +132,9 @@ func ReadNextRESP(b []byte) (n int, resp RESP) {
 	}
 	resp.Type = Type(b[0])
 	switch resp.Type {
-	case Integer, String, Bulk, Array, Error:
+	case Integer, String, Bulk, Array, Error,
+		Null, Double, Boolean, BigNumber, Verbatim, BlobError,
+		Map, Set, Push, Attribute:
 	default:
 		return 0, RESP{} // invalid kind
 	}
@@ -151,21 +173,27 @@ func ReadNextRESP(b []byte) (n int, resp RESP) {
 		}
 		return len(resp.Raw), resp
 	}
-	if resp.Type == String || resp.Type == Error {
-		// String, Error
+	if resp.Type == String || resp.Type == Error ||
+		resp.Type == Null || resp.Type == Double ||
+		resp.Type == Boolean || resp.Type == BigNumber {
+		// Simple one-line types
 		return len(resp.Raw), resp
 	}
 	var err error
 	resp.Count, err = strconv.Atoi(string(resp.Data))
-	if resp.Type == Bulk {
-		// Bulk
+	switch resp.Type {
+	case Bulk, Verbatim, BlobError:
+		// Length-prefixed types with a payload on the following line
 		if err != nil {
 			return 0, RESP{} // invalid number of bytes
 		}
 		if resp.Count < 0 {
-			resp.Data = nil
-			resp.Count = 0
-			return len(resp.Raw), resp
+			if resp.Type == Bulk {
+				resp.Data = nil
+				resp.Count = 0
+				return len(resp.Raw), resp
+			}
+			return 0, RESP{} // invalid number of bytes
 		}
 		if len(b) < i+resp.Count+2 {
 			return 0, RESP{} // not enough data
@@ -178,13 +206,19 @@ func ReadNextRESP(b []byte) (n int, resp RESP) {
 		resp.Count = 0
 		return len(resp.Raw), resp
 	}
-	// Array
+	// Array, Map, Set, Push, Attribute
 	if err != nil {
 		return 0, RESP{} // invalid number of elements
 	}
+	// Map and Attribute headers carry the number of pairs, so read twice as
+	// many elements; the remaining aggregate types carry the element count.
+	elementCount := resp.Count
+	if resp.Type == Map || resp.Type == Attribute {
+		elementCount = resp.Count * 2
+	}
 	var tn int
 	sdata := b[i:]
-	for j := 0; j < resp.Count; j++ {
+	for j := 0; j < elementCount; j++ {
 		rn, rresp := ReadNextRESP(sdata)
 		if rresp.Type == 0 {
 			return 0, RESP{}
@@ -504,6 +538,74 @@ func AppendTile38(b []byte, data []byte) []byte {
 // AppendNull appends a Redis protocol null to the input bytes.
 func AppendNull(b []byte) []byte {
 	return append(b, '$', '-', '1', '\r', '\n')
+}
+
+// AppendNull3 appends a RESP3 protocol null to the input bytes.
+func AppendNull3(b []byte) []byte {
+	return append(b, '_', '\r', '\n')
+}
+
+// AppendDouble appends a RESP3 double to the input bytes.
+func AppendDouble(b []byte, f float64) []byte {
+	b = append(b, ',')
+	b = strconv.AppendFloat(b, f, 'f', -1, 64)
+	return append(b, '\r', '\n')
+}
+
+// AppendBool appends a RESP3 boolean to the input bytes.
+func AppendBool(b []byte, v bool) []byte {
+	if v {
+		return append(b, '#', 't', '\r', '\n')
+	}
+	return append(b, '#', 'f', '\r', '\n')
+}
+
+// AppendBigNumber appends a RESP3 big number to the input bytes.
+func AppendBigNumber(b []byte, s string) []byte {
+	b = append(b, '(')
+	b = append(b, s...)
+	return append(b, '\r', '\n')
+}
+
+// AppendVerbatim appends a RESP3 verbatim string to the input bytes.
+// The format must be exactly 3 bytes, such as "txt" or "mkd".
+func AppendVerbatim(b []byte, format, s string) []byte {
+	b = appendPrefix(b, '=', int64(len(s)+4))
+	b = append(b, format...)
+	b = append(b, ':')
+	b = append(b, s...)
+	return append(b, '\r', '\n')
+}
+
+// AppendBlobError appends a RESP3 blob error to the input bytes.
+func AppendBlobError(b []byte, s string) []byte {
+	b = appendPrefix(b, '!', int64(len(s)))
+	b = append(b, s...)
+	return append(b, '\r', '\n')
+}
+
+// AppendMap appends a RESP3 map header with the given number of pairs.
+// You must then write the key/value sub-responses to complete the reply.
+func AppendMap(b []byte, n int) []byte {
+	return appendPrefix(b, '%', int64(n))
+}
+
+// AppendSet appends a RESP3 set header with the given number of elements.
+// You must then write the element sub-responses to complete the reply.
+func AppendSet(b []byte, n int) []byte {
+	return appendPrefix(b, '~', int64(n))
+}
+
+// AppendPush appends a RESP3 push header with the given number of elements.
+// You must then write the element sub-responses to complete the reply.
+func AppendPush(b []byte, n int) []byte {
+	return appendPrefix(b, '>', int64(n))
+}
+
+// AppendAttribute appends a RESP3 attribute header with the given number of
+// pairs. You must then write the key/value sub-responses to complete the reply.
+func AppendAttribute(b []byte, n int) []byte {
+	return appendPrefix(b, '|', int64(n))
 }
 
 // AppendBulkFloat appends a float64, as bulk bytes.
