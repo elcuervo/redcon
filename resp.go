@@ -775,6 +775,83 @@ func AppendAny(b []byte, v interface{}) []byte {
 	return b
 }
 
+// AppendAny3 appends any type to a valid RESP3 type, mirroring AppendAny but
+// using richer RESP3 encodings:
+//
+//	nil             -> null (`_`)
+//	float32/float64 -> double
+//	bool            -> boolean
+//	slice           -> array with each element enriched
+//	map             -> map type
+//	everything else -> same encoding as AppendAny
+func AppendAny3(b []byte, v interface{}) []byte {
+	switch v := v.(type) {
+	case nil:
+		return AppendNull3(b)
+	case bool:
+		b = AppendBool(b, v)
+		return b
+	case float32:
+		b = AppendDouble(b, float64(v))
+		return b
+	case float64:
+		b = AppendDouble(b, v)
+		return b
+	case []byte:
+		if v == nil {
+			return AppendNull3(b)
+		}
+		return AppendAny(b, v)
+	}
+	vv := reflect.ValueOf(v)
+	switch vv.Kind() {
+	case reflect.Slice:
+		n := vv.Len()
+		b = AppendArray(b, n)
+		for i := 0; i < n; i++ {
+			b = AppendAny3(b, vv.Index(i).Interface())
+		}
+		return b
+	case reflect.Map:
+		n := vv.Len()
+		b = AppendMap(b, n)
+		var i int
+		var strKey bool
+		var strsKeyItems []strKeyItem
+
+		iter := vv.MapRange()
+		for iter.Next() {
+			key := iter.Key().Interface()
+			if i == 0 {
+				if _, ok := key.(string); ok {
+					strKey = true
+					strsKeyItems = make([]strKeyItem, n)
+				}
+			}
+			if strKey {
+				strsKeyItems[i] = strKeyItem{
+					key.(string), iter.Value().Interface(),
+				}
+			} else {
+				b = AppendAny3(b, key)
+				b = AppendAny3(b, iter.Value().Interface())
+			}
+			i++
+		}
+		if strKey {
+			sort.Slice(strsKeyItems, func(i, j int) bool {
+				return strsKeyItems[i].key < strsKeyItems[j].key
+			})
+			for _, item := range strsKeyItems {
+				b = AppendBulkString(b, item.key)
+				b = AppendAny3(b, item.value)
+			}
+		}
+		return b
+	}
+	return AppendAny(b, v)
+}
+
 type strKeyItem struct {
 	key   string
 	value interface{}

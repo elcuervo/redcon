@@ -538,6 +538,51 @@ func TestWriteHello(t *testing.T) {
 	}
 }
 
+func TestWriteAnyRESP3(t *testing.T) {
+	buf := &bytes.Buffer{}
+	wr := NewWriter(buf)
+
+	// RESP2: floats/bools as bulk strings, nil as $-1
+	wr.WriteAny(1.5)
+	wr.WriteAny(true)
+	wr.WriteAny(nil)
+	wr.WriteAny("hi")
+	wr.Flush()
+	exp2 := "$3\r\n1.5\r\n$1\r\n1\r\n$-1\r\n$2\r\nhi\r\n"
+	if buf.String() != exp2 {
+		t.Fatalf("RESP2 WriteAny expected %q, got %q", exp2, buf.String())
+	}
+
+	// RESP3: floats as doubles, bools as booleans, nil as _
+	buf.Reset()
+	wr.SetProtocolVersion(3)
+	wr.WriteAny(1.5)
+	wr.WriteAny(true)
+	wr.WriteAny(nil)
+	wr.WriteAny("hi")
+	wr.Flush()
+	exp3 := ",1.5\r\n#t\r\n_\r\n$2\r\nhi\r\n"
+	if buf.String() != exp3 {
+		t.Fatalf("RESP3 WriteAny expected %q, got %q", exp3, buf.String())
+	}
+
+	// Conn.WriteAny respects the negotiated version
+	buf.Reset()
+	c := &conn{wr: NewWriter(buf)}
+	c.WriteAny(nil)
+	c.wr.Flush()
+	if buf.String() != "$-1\r\n" {
+		t.Fatalf("Conn WriteAny RESP2 null expected $-1, got %q", buf.String())
+	}
+	buf.Reset()
+	c.SetProtocolVersion(3)
+	c.WriteAny(2.5)
+	c.wr.Flush()
+	if buf.String() != ",2.5\r\n" {
+		t.Fatalf("Conn WriteAny RESP3 expected %q, got %q", ",2.5\r\n", buf.String())
+	}
+}
+
 func testMakeRawCommands(rawargs [][]string) []string {
 	var rawcmds []string
 	for i := 0; i < len(rawargs); i++ {

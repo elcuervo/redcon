@@ -326,6 +326,41 @@ func TestRESP3Helpers(t *testing.T) {
 	}
 }
 
+func TestAppendAny3(t *testing.T) {
+	tests := []struct {
+		name string
+		v    interface{}
+		exp  string
+	}{
+		{"Null", nil, "_\r\n"},
+		{"BoolTrue", true, "#t\r\n"},
+		{"BoolFalse", false, "#f\r\n"},
+		{"Float", 1.5, ",1.5\r\n"},
+		{"Float32", float32(1.5), ",1.5\r\n"},
+		{"Int", 5, "$1\r\n5\r\n"},
+		{"String", "hi", "$2\r\nhi\r\n"},
+		{"Bytes", []byte("hi"), "$2\r\nhi\r\n"},
+		{"SimpleString", SimpleString("OK"), "+OK\r\n"},
+		{"Error", fmt.Errorf("ERR oops"), "-ERR oops\r\n"},
+		{"Fallback", struct{ A int }{A: 1}, "$3\r\n{1}\r\n"},
+		{"StringMap", map[string]int{"b": 2, "a": 1},
+			"%2\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n"},
+		{"FloatMap", map[string]float64{"x": 1.5},
+			"%1\r\n$1\r\nx\r\n,1.5\r\n"},
+		{"FloatSlice", []float64{1.5, 2.5}, "*2\r\n,1.5\r\n,2.5\r\n"},
+		{"MixedSlice", []interface{}{1.5, true}, "*2\r\n,1.5\r\n#t\r\n"},
+		{"StringSlice", []string{"a", "b"}, "*2\r\n$1\r\na\r\n$1\r\nb\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(AppendAny3(nil, tt.v))
+			if got != tt.exp {
+				t.Fatalf("expected %q, got %q", tt.exp, got)
+			}
+		})
+	}
+}
+
 func TestAppendRESP3(t *testing.T) {
 	tests := []struct {
 		name string

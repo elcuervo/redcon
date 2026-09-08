@@ -913,7 +913,11 @@ func (w *Writer) WriteAny(v interface{}) {
 	if w.err != nil {
 		return
 	}
-	w.b = AppendAny(w.b, v)
+	if w.ver == 3 {
+		w.b = AppendAny3(w.b, v)
+	} else {
+		w.b = AppendAny(w.b, v)
+	}
 }
 
 // Reader represent a reader for RESP or telnet commands.
