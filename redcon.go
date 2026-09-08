@@ -65,10 +65,38 @@ type Conn interface {
 	//   c.WriteBulkString("item 1")
 	//   c.WriteBulkString("item 2")
 	WriteArray(count int)
-	// WriteNull writes a null to the client
+	// WriteNull writes a null to the client. It is encoded as `_\r\n` in
+	// RESP3 and `$-1\r\n` in RESP2, based on the negotiated protocol version.
 	WriteNull()
 	// WriteRaw writes raw data to the client.
 	WriteRaw(data []byte)
+	// SetProtocolVersion sets the RESP protocol version for the connection.
+	// Version 2 is RESP2 (default) and version 3 is RESP3.
+	SetProtocolVersion(v int)
+	// ProtocolVersion returns the negotiated RESP protocol version.
+	ProtocolVersion() int
+	// WriteDouble writes a RESP3 double to the client.
+	WriteDouble(f float64)
+	// WriteBool writes a RESP3 boolean to the client.
+	WriteBool(v bool)
+	// WriteBigNumber writes a RESP3 big number to the client.
+	WriteBigNumber(s string)
+	// WriteVerbatim writes a RESP3 verbatim string to the client.
+	WriteVerbatim(format, s string)
+	// WriteBlobError writes a RESP3 blob error to the client.
+	WriteBlobError(s string)
+	// WriteMap writes a RESP3 map header with the given number of pairs.
+	// You must then write the key/value sub-responses to complete the reply.
+	WriteMap(count int)
+	// WriteSet writes a RESP3 set header with the given number of elements.
+	// You must then write the element sub-responses to complete the reply.
+	WriteSet(count int)
+	// WritePush writes a RESP3 push header with the given number of elements.
+	// You must then write the element sub-responses to complete the reply.
+	WritePush(count int)
+	// WriteAttribute writes a RESP3 attribute header with the given number of
+	// pairs. You must then write the key/value sub-responses to complete the reply.
+	WriteAttribute(count int)
 	// WriteAny writes any type to the client.
 	//   nil             -> null
 	//   error           -> error (adds "ERR " when first word is not uppercase)
@@ -485,6 +513,19 @@ func (c *conn) WriteError(msg string)       { c.wr.WriteError(msg) }
 func (c *conn) WriteArray(count int)        { c.wr.WriteArray(count) }
 func (c *conn) WriteNull()                  { c.wr.WriteNull() }
 func (c *conn) WriteRaw(data []byte)        { c.wr.WriteRaw(data) }
+func (c *conn) SetProtocolVersion(v int)    { c.wr.SetProtocolVersion(v) }
+func (c *conn) ProtocolVersion() int        { return c.wr.ProtocolVersion() }
+func (c *conn) WriteDouble(f float64)       { c.wr.WriteDouble(f) }
+func (c *conn) WriteBool(v bool)            { c.wr.WriteBool(v) }
+func (c *conn) WriteBigNumber(s string)     { c.wr.WriteBigNumber(s) }
+func (c *conn) WriteVerbatim(format, s string) {
+	c.wr.WriteVerbatim(format, s)
+}
+func (c *conn) WriteBlobError(s string)     { c.wr.WriteBlobError(s) }
+func (c *conn) WriteMap(count int)          { c.wr.WriteMap(count) }
+func (c *conn) WriteSet(count int)          { c.wr.WriteSet(count) }
+func (c *conn) WritePush(count int)         { c.wr.WritePush(count) }
+func (c *conn) WriteAttribute(count int)    { c.wr.WriteAttribute(count) }
 func (c *conn) WriteAny(v interface{})      { c.wr.WriteAny(v) }
 func (c *conn) RemoteAddr() string          { return c.addr }
 func (c *conn) ReadPipeline() []Command {
@@ -500,6 +541,24 @@ func (c *conn) NetConn() net.Conn {
 }
 func (c *conn) WriteBulkFrom(n int64, rb io.Reader) {
 	c.wr.WriteBulkFrom(n, rb)
+}
+
+// WriteHello writes a HELLO reply to the client from the given alternating
+// key/value pairs of server info. It is encoded as a RESP3 Map when the
+// connection has negotiated RESP3 and as a flat RESP2 Array otherwise.
+// Call SetProtocolVersion on the connection before invoking this helper so
+// the reply matches the negotiated protocol version.
+func WriteHello(conn Conn, info ...string) {
+	pairs := len(info) / 2
+	if conn.ProtocolVersion() == 3 {
+		conn.WriteMap(pairs)
+	} else {
+		conn.WriteArray(pairs * 2)
+	}
+	for i := 0; i < len(info); i += 2 {
+		conn.WriteBulkString(info[i])
+		conn.WriteBulkString(info[i+1])
+	}
 }
 
 // BaseWriter returns the underlying connection writer, if any
@@ -597,6 +656,9 @@ type Writer struct {
 	b   []byte
 	err error
 
+	// ver is the negotiated RESP protocol version (2 or 3).
+	ver int
+
 	// buff use io buffer write to w(io.Writer)
 	// for io.Copy r(io.Reader) to w(io.Writer)
 	buff *bufio.Writer
@@ -606,8 +668,20 @@ type Writer struct {
 func NewWriter(wr io.Writer) *Writer {
 	return &Writer{
 		w:    wr,
+		ver:  2,
 		buff: bufio.NewWriter(wr),
 	}
+}
+
+// SetProtocolVersion sets the RESP protocol version for the writer.
+// Version 2 is RESP2 (default) and version 3 is RESP3.
+func (w *Writer) SetProtocolVersion(v int) {
+	w.ver = v
+}
+
+// ProtocolVersion returns the negotiated RESP protocol version.
+func (w *Writer) ProtocolVersion() int {
+	return w.ver
 }
 
 func (w *Writer) WriteBulkFrom(n int64, r io.Reader) {
@@ -619,12 +693,57 @@ func (w *Writer) WriteBulkFrom(n int64, r io.Reader) {
 	w.buff.Write([]byte{'\r', '\n'})
 }
 
-// WriteNull writes a null to the client
+// WriteNull writes a null to the client. It is encoded as `_\r\n` in RESP3
+// and `$-1\r\n` in RESP2, based on the writer's protocol version.
 func (w *Writer) WriteNull() {
 	if w.err != nil {
 		return
 	}
-	w.b = AppendNull(w.b)
+	if w.ver == 3 {
+		w.b = AppendNull3(w.b)
+	} else {
+		w.b = AppendNull(w.b)
+	}
+}
+
+// WriteDouble writes a RESP3 double to the client.
+func (w *Writer) WriteDouble(f float64) {
+	if w.err != nil {
+		return
+	}
+	w.b = AppendDouble(w.b, f)
+}
+
+// WriteBool writes a RESP3 boolean to the client.
+func (w *Writer) WriteBool(v bool) {
+	if w.err != nil {
+		return
+	}
+	w.b = AppendBool(w.b, v)
+}
+
+// WriteBigNumber writes a RESP3 big number to the client.
+func (w *Writer) WriteBigNumber(s string) {
+	if w.err != nil {
+		return
+	}
+	w.b = AppendBigNumber(w.b, s)
+}
+
+// WriteVerbatim writes a RESP3 verbatim string to the client.
+func (w *Writer) WriteVerbatim(format, s string) {
+	if w.err != nil {
+		return
+	}
+	w.b = AppendVerbatim(w.b, format, s)
+}
+
+// WriteBlobError writes a RESP3 blob error to the client.
+func (w *Writer) WriteBlobError(s string) {
+	if w.err != nil {
+		return
+	}
+	w.b = AppendBlobError(w.b, s)
 }
 
 // WriteArray writes an array header. You must then write additional
@@ -639,6 +758,42 @@ func (w *Writer) WriteArray(count int) {
 		return
 	}
 	w.b = AppendArray(w.b, count)
+}
+
+// WriteMap writes a RESP3 map header with the given number of pairs.
+// You must then write the key/value sub-responses to complete the reply.
+func (w *Writer) WriteMap(count int) {
+	if w.err != nil {
+		return
+	}
+	w.b = AppendMap(w.b, count)
+}
+
+// WriteSet writes a RESP3 set header with the given number of elements.
+// You must then write the element sub-responses to complete the reply.
+func (w *Writer) WriteSet(count int) {
+	if w.err != nil {
+		return
+	}
+	w.b = AppendSet(w.b, count)
+}
+
+// WritePush writes a RESP3 push header with the given number of elements.
+// You must then write the element sub-responses to complete the reply.
+func (w *Writer) WritePush(count int) {
+	if w.err != nil {
+		return
+	}
+	w.b = AppendPush(w.b, count)
+}
+
+// WriteAttribute writes a RESP3 attribute header with the given number of
+// pairs. You must then write the key/value sub-responses to complete the reply.
+func (w *Writer) WriteAttribute(count int) {
+	if w.err != nil {
+		return
+	}
+	w.b = AppendAttribute(w.b, count)
 }
 
 // WriteBulk writes bulk bytes to the client.

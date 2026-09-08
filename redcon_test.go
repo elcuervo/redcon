@@ -443,6 +443,101 @@ func TestWriter(t *testing.T) {
 	}
 	buf.Reset()
 }
+func TestWriterProtocolVersion(t *testing.T) {
+	buf := &bytes.Buffer{}
+	wr := NewWriter(buf)
+	if wr.ProtocolVersion() != 2 {
+		t.Fatalf("expected default protocol version 2, got %d", wr.ProtocolVersion())
+	}
+	// RESP2 null
+	wr.WriteNull()
+	wr.Flush()
+	if buf.String() != "$-1\r\n" {
+		t.Fatalf("expected $-1 null in RESP2, got %q", buf.String())
+	}
+	// switch to RESP3
+	wr.SetProtocolVersion(3)
+	if wr.ProtocolVersion() != 3 {
+		t.Fatalf("expected protocol version 3, got %d", wr.ProtocolVersion())
+	}
+	buf.Reset()
+	wr.WriteNull()
+	wr.Flush()
+	if buf.String() != "_\r\n" {
+		t.Fatalf("expected _ null in RESP3, got %q", buf.String())
+	}
+}
+
+func TestWriterRESP3(t *testing.T) {
+	buf := &bytes.Buffer{}
+	wr := NewWriter(buf)
+	wr.SetProtocolVersion(3)
+
+	wr.WriteDouble(1.5)
+	wr.WriteBool(true)
+	wr.WriteBigNumber("123456789012345678901234567890")
+	wr.WriteVerbatim("txt", "hello")
+	wr.WriteBlobError("SYNTAX bad")
+	wr.WriteMap(1)
+	wr.WriteBulkString("k")
+	wr.WriteInt(1)
+	wr.WriteSet(2)
+	wr.WriteString("a")
+	wr.WriteString("b")
+	wr.WritePush(3)
+	wr.WriteString("message")
+	wr.WriteString("ch")
+	wr.WriteString("hi")
+	wr.WriteAttribute(1)
+	wr.WriteString("ttl")
+	wr.WriteInt(100)
+	wr.Flush()
+
+	exp := ",1.5\r\n" +
+		"#t\r\n" +
+		"(123456789012345678901234567890\r\n" +
+		"=9\r\ntxt:hello\r\n" +
+		"!10\r\nSYNTAX bad\r\n" +
+		"%1\r\n" +
+		"$1\r\nk\r\n" +
+		":1\r\n" +
+		"~2\r\n" +
+		"+a\r\n" +
+		"+b\r\n" +
+		">3\r\n" +
+		"+message\r\n" +
+		"+ch\r\n" +
+		"+hi\r\n" +
+		"|1\r\n" +
+		"+ttl\r\n" +
+		":100\r\n"
+	if buf.String() != exp {
+		t.Fatalf("expected %q, got %q", exp, buf.String())
+	}
+}
+
+func TestWriteHello(t *testing.T) {
+	// RESP2 shape: flat array of alternating key/value pairs
+	buf := &bytes.Buffer{}
+	c := &conn{wr: NewWriter(buf)}
+	WriteHello(c, "server", "redcon", "proto", "2", "id", "1")
+	c.wr.Flush()
+	exp2 := "*6\r\n$6\r\nserver\r\n$6\r\nredcon\r\n$5\r\nproto\r\n$1\r\n2\r\n$2\r\nid\r\n$1\r\n1\r\n"
+	if buf.String() != exp2 {
+		t.Fatalf("RESP2 hello expected %q, got %q", exp2, buf.String())
+	}
+
+	// RESP3 shape: map
+	buf.Reset()
+	c.SetProtocolVersion(3)
+	WriteHello(c, "server", "redcon", "proto", "3", "id", "1")
+	c.wr.Flush()
+	exp3 := "%3\r\n$6\r\nserver\r\n$6\r\nredcon\r\n$5\r\nproto\r\n$1\r\n3\r\n$2\r\nid\r\n$1\r\n1\r\n"
+	if buf.String() != exp3 {
+		t.Fatalf("RESP3 hello expected %q, got %q", exp3, buf.String())
+	}
+}
+
 func testMakeRawCommands(rawargs [][]string) []string {
 	var rawcmds []string
 	for i := 0; i < len(rawargs); i++ {

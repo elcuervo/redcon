@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -55,6 +56,36 @@ func main() {
 					hconn.WriteString("OK")
 					hconn.Flush()
 				}()
+			case "hello":
+				// HELLO switches the connection to the requested RESP protocol
+				// version (2 or 3) and returns a map of server info. Called with
+				// no argument it just reports the current configuration.
+				if len(cmd.Args) > 2 {
+					conn.WriteError("ERR wrong number of arguments for 'hello' command")
+					return
+				}
+				if len(cmd.Args) == 2 {
+					var ver int
+					switch string(cmd.Args[1]) {
+					case "2":
+						ver = 2
+					case "3":
+						ver = 3
+					default:
+						conn.WriteError("NOPROTO unsupported protocol version")
+						return
+					}
+					conn.SetProtocolVersion(ver)
+				}
+				redcon.WriteHello(conn,
+					"server", "redcon",
+					"version", "0.1.0",
+					"proto", strconv.Itoa(conn.ProtocolVersion()),
+					"mode", "standalone",
+					"role", "master",
+					"id", "1",
+					"modules", "",
+				)
 			case "ping":
 				conn.WriteString("PONG")
 			case "quit":
