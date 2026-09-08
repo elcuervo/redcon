@@ -3,6 +3,7 @@ package redcon
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"math/rand"
 	"strconv"
 	"testing"
@@ -227,6 +228,18 @@ func TestAppendBulkFloat(t *testing.T) {
 	if string(b) != exp {
 		t.Fatalf("expected '%s', got '%s'", exp, b)
 	}
+
+	// Special values use the canonical short forms like Redis and finite
+	// values keep the historical 'f' formatting.
+	var s []byte
+	s = AppendBulkFloat(s, math.Inf(1))
+	s = AppendBulkFloat(s, math.Inf(-1))
+	s = AppendBulkFloat(s, math.NaN())
+	s = AppendBulkFloat(s, 0.000000001)
+	exp = "$3\r\ninf\r\n$4\r\n-inf\r\n$3\r\nnan\r\n$11\r\n0.000000001\r\n"
+	if string(s) != exp {
+		t.Fatalf("expected '%s', got '%s'", exp, s)
+	}
 }
 
 func TestAppendBulkInt(t *testing.T) {
@@ -348,6 +361,9 @@ func TestAppendAny3(t *testing.T) {
 		{"FloatMap", map[string]float64{"x": 1.5},
 			"%1\r\n$1\r\nx\r\n,1.5\r\n"},
 		{"FloatSlice", []float64{1.5, 2.5}, "*2\r\n,1.5\r\n,2.5\r\n"},
+		{"FloatSpecialSlice", []float64{math.Inf(1), math.Inf(-1), math.NaN()},
+			"*3\r\n,inf\r\n,-inf\r\n,nan\r\n"},
+		{"FloatHuge", 1e300, ",1e+300\r\n"},
 		{"MixedSlice", []interface{}{1.5, true}, "*2\r\n,1.5\r\n#t\r\n"},
 		{"StringSlice", []string{"a", "b"}, "*2\r\n$1\r\na\r\n$1\r\nb\r\n"},
 	}
@@ -369,6 +385,12 @@ func TestAppendRESP3(t *testing.T) {
 	}{
 		{"Null3", AppendNull3(nil), "_\r\n"},
 		{"Double", AppendDouble(nil, 9.123192839), ",9.123192839\r\n"},
+		{"DoubleInf", AppendDouble(nil, math.Inf(1)), ",inf\r\n"},
+		{"DoubleNegInf", AppendDouble(nil, math.Inf(-1)), ",-inf\r\n"},
+		{"DoubleNaN", AppendDouble(nil, math.NaN()), ",nan\r\n"},
+		{"DoubleNegZero", AppendDouble(nil, math.Copysign(0, -1)), ",-0\r\n"},
+		{"DoubleHuge", AppendDouble(nil, 1e300), ",1e+300\r\n"},
+		{"DoubleTiny", AppendDouble(nil, 1e-9), ",1e-09\r\n"},
 		{"BoolTrue", AppendBool(nil, true), "#t\r\n"},
 		{"BoolFalse", AppendBool(nil, false), "#f\r\n"},
 		{"BigNumber", AppendBigNumber(nil,

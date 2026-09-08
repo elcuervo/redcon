@@ -2,6 +2,7 @@ package redcon
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -545,10 +546,32 @@ func AppendNull3(b []byte) []byte {
 	return append(b, '_', '\r', '\n')
 }
 
-// AppendDouble appends a RESP3 double to the input bytes.
+// appendDouble appends the canonical text of a double precision value f,
+// mirroring how Redis formats them: the special values +Inf, -Inf and NaN
+// become the short forms "inf", "-inf" and "nan", while every other value
+// uses the shortest decimal representation that round-trips.
+// Finite values are formatted with verb 'g' when fmtVerb is 0 and with verb
+// 'f' otherwise, both at precision -1.
+func appendDouble(b []byte, f float64, fmtVerb byte) []byte {
+	switch {
+	case math.IsInf(f, 1):
+		return append(b, "inf"...)
+	case math.IsInf(f, -1):
+		return append(b, "-inf"...)
+	case math.IsNaN(f):
+		return append(b, "nan"...)
+	}
+	if fmtVerb == 0 {
+		fmtVerb = 'g'
+	}
+	return strconv.AppendFloat(b, f, fmtVerb, -1, 64)
+}
+
+// AppendDouble appends a RESP3 double to the input bytes. Special values are
+// serialized as `,inf\r\n`, `,-inf\r\n`, and `,nan\r\n` like Redis.
 func AppendDouble(b []byte, f float64) []byte {
 	b = append(b, ',')
-	b = strconv.AppendFloat(b, f, 'f', -1, 64)
+	b = appendDouble(b, f, 0)
 	return append(b, '\r', '\n')
 }
 
@@ -608,9 +631,11 @@ func AppendAttribute(b []byte, n int) []byte {
 	return appendPrefix(b, '|', int64(n))
 }
 
-// AppendBulkFloat appends a float64, as bulk bytes.
+// AppendBulkFloat appends a float64, as bulk bytes. Special values are
+// serialized as "inf", "-inf", and "nan" like Redis. Finite values keep the
+// historical 'f' formatting.
 func AppendBulkFloat(dst []byte, f float64) []byte {
-	return AppendBulk(dst, strconv.AppendFloat(nil, f, 'f', -1, 64))
+	return AppendBulk(dst, appendDouble(nil, f, 'f'))
 }
 
 // AppendBulkInt appends an int64, as bulk bytes.

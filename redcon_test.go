@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"os"
@@ -574,12 +575,14 @@ func TestWriteAnyRESP3(t *testing.T) {
 	if buf.String() != "$-1\r\n" {
 		t.Fatalf("Conn WriteAny RESP2 null expected $-1, got %q", buf.String())
 	}
+	// RESP3 arrays of floats with special values serialize to canonical
+	// doubles (inf, -inf, nan) like Redis.
 	buf.Reset()
-	c.SetProtocolVersion(3)
-	c.WriteAny(2.5)
-	c.wr.Flush()
-	if buf.String() != ",2.5\r\n" {
-		t.Fatalf("Conn WriteAny RESP3 expected %q, got %q", ",2.5\r\n", buf.String())
+	wr.WriteAny([]float64{math.Inf(1), math.Inf(-1), math.NaN(), 1e300})
+	wr.Flush()
+	expSpecial := "*4\r\n,inf\r\n,-inf\r\n,nan\r\n,1e+300\r\n"
+	if buf.String() != expSpecial {
+		t.Fatalf("RESP3 special doubles expected %q, got %q", expSpecial, buf.String())
 	}
 }
 
