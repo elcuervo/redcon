@@ -1328,19 +1328,66 @@ type pubSubEntry struct {
 func (sconn *pubSubConn) writeMessage(pat bool, pchan, channel, msg string) {
 	sconn.mu.Lock()
 	defer sconn.mu.Unlock()
+	// RESP3 uses the Push type for pub/sub messages.
+	header := func(n int) {
+		if sconn.dconn.ProtocolVersion() == 3 {
+			sconn.dconn.WritePush(n)
+		} else {
+			sconn.dconn.WriteArray(n)
+		}
+	}
 	if pat {
-		sconn.dconn.WriteArray(4)
+		header(4)
 		sconn.dconn.WriteBulkString("pmessage")
 		sconn.dconn.WriteBulkString(pchan)
 		sconn.dconn.WriteBulkString(channel)
 		sconn.dconn.WriteBulkString(msg)
 	} else {
-		sconn.dconn.WriteArray(3)
+		header(3)
 		sconn.dconn.WriteBulkString("message")
 		sconn.dconn.WriteBulkString(channel)
 		sconn.dconn.WriteBulkString(msg)
 	}
 	sconn.dconn.Flush()
+}
+
+// writeSubscribeConfirmation writes a (p)subscribe confirmation for the given
+// channel and subscription count, as a RESP3 Push or a RESP2 Array.
+func (sconn *pubSubConn) writeSubscribeConfirmation(pattern bool, channel string, count int) {
+	if sconn.dconn.ProtocolVersion() == 3 {
+		sconn.dconn.WritePush(3)
+	} else {
+		sconn.dconn.WriteArray(3)
+	}
+	if pattern {
+		sconn.dconn.WriteBulkString("psubscribe")
+	} else {
+		sconn.dconn.WriteBulkString("subscribe")
+	}
+	sconn.dconn.WriteBulkString(channel)
+	sconn.dconn.WriteInt(count)
+}
+
+// writeUnsubscribeConfirmation writes a (p)unsubscribe confirmation for the
+// given channel (empty means no channel, encoded as null) and subscription
+// count, as a RESP3 Push or a RESP2 Array.
+func (sconn *pubSubConn) writeUnsubscribeConfirmation(pattern bool, channel string, count int) {
+	if sconn.dconn.ProtocolVersion() == 3 {
+		sconn.dconn.WritePush(3)
+	} else {
+		sconn.dconn.WriteArray(3)
+	}
+	if pattern {
+		sconn.dconn.WriteBulkString("punsubscribe")
+	} else {
+		sconn.dconn.WriteBulkString("unsubscribe")
+	}
+	if channel == "" {
+		sconn.dconn.WriteNull()
+	} else {
+		sconn.dconn.WriteBulkString(channel)
+	}
+	sconn.dconn.WriteInt(count)
 }
 
 // bgrunner runs in the background and reads incoming commands from the
@@ -1511,20 +1558,13 @@ func (ps *PubSub) subscribe(conn Conn, pattern bool, channel string) {
 	sconn.entries[entry] = true
 
 	// send a message to the client
-	sconn.dconn.WriteArray(3)
-	if pattern {
-		sconn.dconn.WriteBulkString("psubscribe")
-	} else {
-		sconn.dconn.WriteBulkString("subscribe")
-	}
-	sconn.dconn.WriteBulkString(channel)
 	var count int
 	for entry := range sconn.entries {
 		if entry.pattern == pattern {
 			count++
 		}
 	}
-	sconn.dconn.WriteInt(count)
+	sconn.writeSubscribeConfirmation(pattern, channel, count)
 	sconn.dconn.Flush()
 
 	// start the background client operation
@@ -1546,16 +1586,9 @@ func (ps *PubSub) unsubscribe(conn Conn, pattern, all bool, channel string) {
 			ps.chans.Delete(entry)
 			delete(sconn.entries, entry)
 		}
-		sconn.dconn.WriteArray(3)
-		if pattern {
-			sconn.dconn.WriteBulkString("punsubscribe")
-		} else {
-			sconn.dconn.WriteBulkString("unsubscribe")
-		}
+		var channel string
 		if entry != nil {
-			sconn.dconn.WriteBulkString(entry.channel)
-		} else {
-			sconn.dconn.WriteNull()
+			channel = entry.channel
 		}
 		var count int
 		for entry := range sconn.entries {
@@ -1563,7 +1596,7 @@ func (ps *PubSub) unsubscribe(conn Conn, pattern, all bool, channel string) {
 				count++
 			}
 		}
-		sconn.dconn.WriteInt(count)
+		sconn.writeUnsubscribeConfirmation(pattern, channel, count)
 	}
 	if all {
 		// unsubscribe from all (p)subscribe entries

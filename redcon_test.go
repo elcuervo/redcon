@@ -681,6 +681,180 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestPubSubMessageRESP3(t *testing.T) {
+	buf := &bytes.Buffer{}
+	c := &conn{wr: NewWriter(buf)}
+	sconn := &pubSubConn{dconn: &detachedConn{conn: c}}
+
+	// RESP2 message
+	sconn.writeMessage(false, "", "ch", "hi")
+	if buf.String() != "*3\r\n$7\r\nmessage\r\n$2\r\nch\r\n$2\r\nhi\r\n" {
+		t.Fatalf("RESP2 message mismatch: %q", buf.String())
+	}
+	// RESP2 pmessage
+	buf.Reset()
+	sconn.writeMessage(true, "p*", "ch", "hi")
+	if buf.String() != "*4\r\n$8\r\npmessage\r\n$2\r\np*\r\n$2\r\nch\r\n$2\r\nhi\r\n" {
+		t.Fatalf("RESP2 pmessage mismatch: %q", buf.String())
+	}
+	// RESP3 message
+	buf.Reset()
+	c.SetProtocolVersion(3)
+	sconn.writeMessage(false, "", "ch", "hi")
+	if buf.String() != ">3\r\n$7\r\nmessage\r\n$2\r\nch\r\n$2\r\nhi\r\n" {
+		t.Fatalf("RESP3 message mismatch: %q", buf.String())
+	}
+	// RESP3 pmessage
+	buf.Reset()
+	sconn.writeMessage(true, "p*", "ch", "hi")
+	if buf.String() != ">4\r\n$8\r\npmessage\r\n$2\r\np*\r\n$2\r\nch\r\n$2\r\nhi\r\n" {
+		t.Fatalf("RESP3 pmessage mismatch: %q", buf.String())
+	}
+}
+
+func TestPubSubConfirmationsRESP3(t *testing.T) {
+	buf := &bytes.Buffer{}
+	c := &conn{wr: NewWriter(buf)}
+	sconn := &pubSubConn{dconn: &detachedConn{conn: c}}
+
+	// RESP2 subscribe / psubscribe
+	sconn.writeSubscribeConfirmation(false, "ch", 3)
+	sconn.dconn.Flush()
+	if buf.String() != "*3\r\n$9\r\nsubscribe\r\n$2\r\nch\r\n:3\r\n" {
+		t.Fatalf("RESP2 subscribe mismatch: %q", buf.String())
+	}
+	buf.Reset()
+	sconn.writeSubscribeConfirmation(true, "p*", 2)
+	sconn.dconn.Flush()
+	if buf.String() != "*3\r\n$10\r\npsubscribe\r\n$2\r\np*\r\n:2\r\n" {
+		t.Fatalf("RESP2 psubscribe mismatch: %q", buf.String())
+	}
+	// RESP2 unsubscribe all with null channel
+	buf.Reset()
+	sconn.writeUnsubscribeConfirmation(false, "", 0)
+	sconn.dconn.Flush()
+	if buf.String() != "*3\r\n$11\r\nunsubscribe\r\n$-1\r\n:0\r\n" {
+		t.Fatalf("RESP2 unsubscribe mismatch: %q", buf.String())
+	}
+
+	// RESP3 subscribe / psubscribe
+	buf.Reset()
+	c.SetProtocolVersion(3)
+	sconn.writeSubscribeConfirmation(false, "ch", 3)
+	sconn.dconn.Flush()
+	if buf.String() != ">3\r\n$9\r\nsubscribe\r\n$2\r\nch\r\n:3\r\n" {
+		t.Fatalf("RESP3 subscribe mismatch: %q", buf.String())
+	}
+	buf.Reset()
+	sconn.writeSubscribeConfirmation(true, "p*", 2)
+	sconn.dconn.Flush()
+	if buf.String() != ">3\r\n$10\r\npsubscribe\r\n$2\r\np*\r\n:2\r\n" {
+		t.Fatalf("RESP3 psubscribe mismatch: %q", buf.String())
+	}
+	// RESP3 unsubscribe all with RESP3 null channel
+	buf.Reset()
+	sconn.writeUnsubscribeConfirmation(false, "", 0)
+	sconn.dconn.Flush()
+	if buf.String() != ">3\r\n$11\r\nunsubscribe\r\n_\r\n:0\r\n" {
+		t.Fatalf("RESP3 unsubscribe mismatch: %q", buf.String())
+	}
+	// RESP3 punsubscribe with a channel
+	buf.Reset()
+	sconn.writeUnsubscribeConfirmation(true, "p*", 1)
+	sconn.dconn.Flush()
+	if buf.String() != ">3\r\n$12\r\npunsubscribe\r\n$2\r\np*\r\n:1\r\n" {
+		t.Fatalf("RESP3 punsubscribe mismatch: %q", buf.String())
+	}
+}
+
+func TestPubSubIntegrationRESP3(t *testing.T) {
+	addr := ":12348"
+	var ps PubSub
+	go func() {
+		err := ListenAndServe(addr, func(conn Conn, cmd Command) {
+			switch strings.ToLower(string(cmd.Args[0])) {
+			default:
+				conn.WriteError("ERR unknown command '" + string(cmd.Args[0]) + "'")
+			case "hello":
+				if len(cmd.Args) == 2 && string(cmd.Args[1]) == "3" {
+					conn.SetProtocolVersion(3)
+				}
+				conn.WriteString("OK")
+			case "publish":
+				count := ps.Publish(string(cmd.Args[1]), string(cmd.Args[2]))
+				conn.WriteInt(count)
+			case "subscribe":
+				ps.Subscribe(conn, string(cmd.Args[1]))
+			}
+		}, nil, nil)
+		if err != nil {
+			panic(err)
+		}
+	}()
+	time.Sleep(time.Second / 8)
+
+	dial := func() net.Conn {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	readRESP := func(rd *bufio.Reader) RESP {
+		var buf []byte
+		for {
+			line, err := rd.ReadBytes('\n')
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			buf = append(buf, line...)
+			n, resp := ReadNextRESP(buf)
+			if n > 0 {
+				return resp
+			}
+		}
+	}
+
+	// client A negotiates RESP3 and subscribes
+	a := dial()
+	defer a.Close()
+	ard := bufio.NewReader(a)
+	fmt.Fprint(a, "HELLO 3\r\n")
+	if rr := readRESP(ard); rr.Type != String || rr.String() != "OK" {
+		t.Fatalf("expected +OK, got %v", rr)
+	}
+	fmt.Fprint(a, "SUBSCRIBE ch\r\n")
+	if rr := readRESP(ard); rr.Type != Push {
+		t.Fatalf("expected RESP3 push confirmation, got type %d", rr.Type)
+	}
+
+	// client B stays RESP2 and subscribes
+	b := dial()
+	defer b.Close()
+	brd := bufio.NewReader(b)
+	fmt.Fprint(b, "SUBSCRIBE ch\r\n")
+	if rr := readRESP(brd); rr.Type != Array {
+		t.Fatalf("expected RESP2 array confirmation, got type %d", rr.Type)
+	}
+
+	// client C publishes
+	c3 := dial()
+	defer c3.Close()
+	crd := bufio.NewReader(c3)
+	fmt.Fprint(c3, "PUBLISH ch hello\r\n")
+	if rr := readRESP(crd); rr.Type != Integer || rr.Int() != 2 {
+		t.Fatalf("expected publish count 2, got %v", rr)
+	}
+
+	// A receives a push message, B receives an array message
+	if rr := readRESP(ard); rr.Type != Push {
+		t.Fatalf("expected RESP3 push message, got type %d", rr.Type)
+	}
+	if rr := readRESP(brd); rr.Type != Array {
+		t.Fatalf("expected RESP2 array message, got type %d", rr.Type)
+	}
+}
+
 func TestPubSub(t *testing.T) {
 	addr := ":12346"
 	done := make(chan bool)
