@@ -684,6 +684,36 @@ func TestPlainReader(t *testing.T) {
 	}
 }
 
+func TestReaderMaxBulkSize(t *testing.T) {
+	// Within the cap: the command reads normally.
+	rd := NewReader(strings.NewReader("*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"))
+	rd.SetMaxBulkSize(5)
+	cmd, err := rd.ReadCommand()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cmd.Args) != 2 || string(cmd.Args[0]) != "GET" || string(cmd.Args[1]) != "hello" {
+		t.Fatalf("unexpected command: %q", cmd.Args)
+	}
+
+	// Over the cap: rejected from the declared header alone. The payload is
+	// deliberately absent, proving it is refused before buffering.
+	rd = NewReader(strings.NewReader("*2\r\n$3\r\nGET\r\n$1000\r\n"))
+	rd.SetMaxBulkSize(5)
+	if _, err := rd.ReadCommand(); err == nil {
+		t.Fatal("expected a protocol error for an oversized declared bulk")
+	} else if _, ok := err.(*errProtocol); !ok {
+		t.Fatalf("expected *errProtocol, got %T: %v", err, err)
+	}
+
+	// Zero disables the guard.
+	rd = NewReader(strings.NewReader("*2\r\n$3\r\nGET\r\n$1000\r\n" + strings.Repeat("x", 1000) + "\r\n"))
+	rd.SetMaxBulkSize(0)
+	if _, err := rd.ReadCommand(); err != nil {
+		t.Fatalf("zero cap should disable the guard: %v", err)
+	}
+}
+
 func TestParse(t *testing.T) {
 	_, err := Parse(nil)
 	if err != errIncompleteCommand {

@@ -406,6 +406,7 @@ func serve(s *Server) error {
 		}
 		s.mu.Lock()
 		c.idleClose = s.idleClose
+		c.rd.SetMaxBulkSize(s.maxBulkSize)
 		s.conns[c] = true
 		s.mu.Unlock()
 		if s.accept != nil && !s.accept(c) {
@@ -639,6 +640,8 @@ type Server struct {
 	ln        net.Listener
 	done      bool
 	idleClose time.Duration
+	// maxBulkSize is propagated to each accepted connection's Reader.
+	maxBulkSize int64
 
 	// AcceptError is an optional function used to handle Accept errors.
 	AcceptError func(err error)
@@ -927,6 +930,17 @@ type Reader struct {
 	start int
 	end   int
 	cmds  []Command
+
+	// maxBulkSize, when > 0, refuses a bulk whose declared length exceeds it
+	// BEFORE buffering the payload. It bounds the memory a single binary
+	// argument can make the server allocate.
+	maxBulkSize int64
+}
+
+// SetMaxBulkSize refuses any bulk argument whose declared length exceeds n
+// bytes before its payload is buffered. Zero (the default) disables the guard.
+func (rd *Reader) SetMaxBulkSize(n int64) {
+	rd.maxBulkSize = n
 }
 
 // NewReader returns a command reader which will read RESP or telnet commands.
@@ -1076,6 +1090,9 @@ func (rd *Reader) readCommands(leftover *int) ([]Command, error) {
 									size, ok := parseInt(b[si+1 : i-1])
 									if !ok || size < 0 {
 										return nil, errInvalidBulkLength
+									}
+									if rd.maxBulkSize > 0 && int64(size) > rd.maxBulkSize {
+										return nil, &errProtocol{fmt.Sprintf("bulk value of %d bytes exceeds the maximum of %d", size, rd.maxBulkSize)}
 									}
 									if i+size+2 >= len(b) {
 										// not ready
@@ -1627,6 +1644,16 @@ func (ps *PubSub) unsubscribe(conn Conn, pattern, all bool, channel string) {
 		}
 	}
 	sconn.dconn.Flush()
+}
+
+// SetMaxBulkSize refuses any bulk argument whose declared length exceeds n
+// bytes before its payload is buffered. Zero (the default) disables the guard.
+// It bounds the memory a single binary argument can allocate; the connection's
+// reader returns a protocol error and the client receives an ERR reply.
+func (s *Server) SetMaxBulkSize(n int64) {
+	s.mu.Lock()
+	s.maxBulkSize = n
+	s.mu.Unlock()
 }
 
 // SetIdleClose will automatically close idle connections after the specified
