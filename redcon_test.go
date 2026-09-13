@@ -714,6 +714,84 @@ func TestReaderMaxBulkSize(t *testing.T) {
 	}
 }
 
+func TestReaderMaxCommandSize(t *testing.T) {
+	// Within the cap: the command reads normally.
+	rd := NewReader(strings.NewReader("*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"))
+	rd.SetMaxCommandSize(64)
+	cmd, err := rd.ReadCommand()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cmd.Args) != 2 || string(cmd.Args[0]) != "GET" || string(cmd.Args[1]) != "hello" {
+		t.Fatalf("unexpected command: %q", cmd.Args)
+	}
+
+	// Aggregate overrun across individually permitted bulks: each bulk is well
+	// under the cap, but the running total crosses it. The payloads are
+	// deliberately absent, proving the guard refuses from the declared headers
+	// before buffering rather than only bounding one argument.
+	// Declared bytes: 4 (header) + 8 + 8 + 8 = 28 > 20.
+	rd = NewReader(strings.NewReader("*3\r\n$2\r\nab\r\n$2\r\ncd\r\n$2\r\n"))
+	rd.SetMaxCommandSize(20)
+	if _, err := rd.ReadCommand(); err == nil {
+		t.Fatal("expected a protocol error for an aggregate command overrun")
+	} else if _, ok := err.(*errProtocol); !ok {
+		t.Fatalf("expected *errProtocol, got %T: %v", err, err)
+	}
+
+	// The same command fits once the cap is raised: the guard is a limit, not
+	// a rejection of multi-bulk commands.
+	rd = NewReader(strings.NewReader("*3\r\n$2\r\nab\r\n$2\r\ncd\r\n$2\r\nef\r\n"))
+	rd.SetMaxCommandSize(28)
+	if _, err := rd.ReadCommand(); err != nil {
+		t.Fatalf("command at the cap should read: %v", err)
+	}
+
+	// An inline command longer than the cap is refused too.
+	rd = NewReader(strings.NewReader("GET hello\r\n"))
+	rd.SetMaxCommandSize(5)
+	if _, err := rd.ReadCommand(); err == nil {
+		t.Fatal("expected a protocol error for an oversized inline command")
+	} else if _, ok := err.(*errProtocol); !ok {
+		t.Fatalf("expected *errProtocol, got %T: %v", err, err)
+	}
+
+	// Zero disables the guard.
+	rd = NewReader(strings.NewReader("*3\r\n$2\r\nab\r\n$2\r\ncd\r\n$2\r\nef\r\n"))
+	rd.SetMaxCommandSize(0)
+	if _, err := rd.ReadCommand(); err != nil {
+		t.Fatalf("zero cap should disable the guard: %v", err)
+	}
+}
+
+func TestServerMaxCommandSizePropagates(t *testing.T) {
+	s := NewServer("", func(conn Conn, cmd Command) { conn.WriteString("OK") }, nil, nil)
+	s.SetMaxCommandSize(20)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = s.Serve(ln) }()
+	defer s.Close()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("*3\r\n$2\r\nab\r\n$2\r\ncd\r\n$2\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 256)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("reading reply: %v", err)
+	}
+	if !strings.HasPrefix(string(buf[:n]), "-ERR ") || !strings.Contains(string(buf[:n]), "maximum") {
+		t.Fatalf("expected an ERR reply mentioning the maximum, got %q", buf[:n])
+	}
+}
+
 func TestParse(t *testing.T) {
 	_, err := Parse(nil)
 	if err != errIncompleteCommand {
