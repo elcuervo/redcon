@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -936,21 +937,23 @@ type Reader struct {
 
 	// maxBulkSize, when > 0, refuses a bulk whose declared length exceeds it
 	// BEFORE buffering the payload. It bounds the memory a single binary
-	// argument can make the server allocate.
-	maxBulkSize int64
+	// argument can make the server allocate. Atomic so a Server.SetMaxBulkSize
+	// can update a live connection's reader.
+	maxBulkSize atomic.Int64
 
 	// maxCommandSize, when > 0, refuses a command whose cumulative RESP bytes
 	// (all bulk arguments plus framing) exceed it, as soon as the declared
 	// sizes cross the limit and before the payloads that would cross it are
 	// buffered. It bounds the aggregate memory one command can allocate, which
-	// maxBulkSize alone does not (N sub-cap bulks still sum to N*cap).
-	maxCommandSize int64
+	// maxBulkSize alone does not (N sub-cap bulks still sum to N*cap). Atomic
+	// so a Server.SetMaxCommandSize can update a live connection's reader.
+	maxCommandSize atomic.Int64
 }
 
 // SetMaxBulkSize refuses any bulk argument whose declared length exceeds n
 // bytes before its payload is buffered. Zero (the default) disables the guard.
 func (rd *Reader) SetMaxBulkSize(n int64) {
-	rd.maxBulkSize = n
+	rd.maxBulkSize.Store(n)
 }
 
 // SetMaxCommandSize refuses any command whose cumulative RESP bytes (every bulk
@@ -959,7 +962,7 @@ func (rd *Reader) SetMaxBulkSize(n int64) {
 // aggregate memory a single command can make the reader allocate, which
 // SetMaxBulkSize alone does not.
 func (rd *Reader) SetMaxCommandSize(n int64) {
-	rd.maxCommandSize = n
+	rd.maxCommandSize.Store(n)
 }
 
 // NewReader returns a command reader which will read RESP or telnet commands.
@@ -976,6 +979,11 @@ func parseInt(b []byte) (int, bool) {
 }
 
 func (rd *Reader) readCommands(leftover *int) ([]Command, error) {
+	// Snapshot the limits once so one command is parsed against a single
+	// consistent pair of caps even if SetMax* runs concurrently.
+	maxBulkSize := rd.maxBulkSize.Load()
+	maxCommandSize := rd.maxCommandSize.Load()
+
 	var cmds []Command
 	b := rd.buf[rd.start:rd.end]
 	if rd.end-rd.start == 0 && len(rd.buf) > 4096 {
@@ -992,8 +1000,8 @@ func (rd *Reader) readCommands(leftover *int) ([]Command, error) {
 			// just a plain text command
 			for i := 0; i < len(b); i++ {
 				if b[i] == '\n' {
-					if rd.maxCommandSize > 0 && int64(i+1) > rd.maxCommandSize {
-						return nil, &errProtocol{fmt.Sprintf("command of %d bytes exceeds the maximum of %d", i+1, rd.maxCommandSize)}
+					if maxCommandSize > 0 && int64(i+1) > maxCommandSize {
+						return nil, &errProtocol{fmt.Sprintf("command of %d bytes exceeds the maximum of %d", i+1, maxCommandSize)}
 					}
 					var line []byte
 					if i > 0 && b[i-1] == '\r' {
@@ -1118,13 +1126,13 @@ func (rd *Reader) readCommands(leftover *int) ([]Command, error) {
 									if !ok || size < 0 {
 										return nil, errInvalidBulkLength
 									}
-									if rd.maxBulkSize > 0 && int64(size) > rd.maxBulkSize {
-										return nil, &errProtocol{fmt.Sprintf("bulk value of %d bytes exceeds the maximum of %d", size, rd.maxBulkSize)}
+									if maxBulkSize > 0 && int64(size) > maxBulkSize {
+										return nil, &errProtocol{fmt.Sprintf("bulk value of %d bytes exceeds the maximum of %d", size, maxBulkSize)}
 									}
-									if rd.maxCommandSize > 0 {
+									if maxCommandSize > 0 {
 										cmdSize += int64(i-si+1) + int64(size) + 2
-										if cmdSize > rd.maxCommandSize {
-											return nil, &errProtocol{fmt.Sprintf("command of %d bytes exceeds the maximum of %d", cmdSize, rd.maxCommandSize)}
+										if cmdSize > maxCommandSize {
+											return nil, &errProtocol{fmt.Sprintf("command of %d bytes exceeds the maximum of %d", cmdSize, maxCommandSize)}
 										}
 									}
 									if i+size+2 >= len(b) {
@@ -1184,8 +1192,8 @@ func (rd *Reader) readCommands(leftover *int) ([]Command, error) {
 	}
 	// No complete command was parsed, so the pending bytes are one incomplete
 	// command. Once they reach the limit, that command can only be over it.
-	if rd.maxCommandSize > 0 && int64(rd.end-rd.start) >= rd.maxCommandSize {
-		return nil, &errProtocol{fmt.Sprintf("command of %d bytes exceeds the maximum of %d", rd.end-rd.start, rd.maxCommandSize)}
+	if maxCommandSize > 0 && int64(rd.end-rd.start) >= maxCommandSize {
+		return nil, &errProtocol{fmt.Sprintf("command of %d bytes exceeds the maximum of %d", rd.end-rd.start, maxCommandSize)}
 	}
 	if rd.end == len(rd.buf) {
 		// at the end of the buffer.
@@ -1691,6 +1699,9 @@ func (ps *PubSub) unsubscribe(conn Conn, pattern, all bool, channel string) {
 func (s *Server) SetMaxBulkSize(n int64) {
 	s.mu.Lock()
 	s.maxBulkSize = n
+	for c := range s.conns {
+		c.rd.SetMaxBulkSize(n)
+	}
 	s.mu.Unlock()
 }
 
@@ -1703,6 +1714,9 @@ func (s *Server) SetMaxBulkSize(n int64) {
 func (s *Server) SetMaxCommandSize(n int64) {
 	s.mu.Lock()
 	s.maxCommandSize = n
+	for c := range s.conns {
+		c.rd.SetMaxCommandSize(n)
+	}
 	s.mu.Unlock()
 }
 

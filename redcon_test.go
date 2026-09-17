@@ -792,6 +792,92 @@ func TestServerMaxCommandSizePropagates(t *testing.T) {
 	}
 }
 
+// TestServerMaxCommandSizePropagatesToActiveConn pins that a live limit update
+// reaches connections that were already accepted, not only future ones. Before
+// the fix, each reader copied the server limit at accept and kept the old cap,
+// so a command allowed by the new limit was rejected.
+func TestServerMaxCommandSizePropagatesToActiveConn(t *testing.T) {
+	s := NewServer("", func(conn Conn, cmd Command) { conn.WriteString("OK") }, nil, nil)
+	s.SetMaxCommandSize(20)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = s.Serve(ln) }()
+	defer s.Close()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Establish the connection while the cap is 20 and prove it is live.
+	if _, err := conn.Write([]byte("PING\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 256)
+	if n, err := conn.Read(buf); err != nil || !strings.HasPrefix(string(buf[:n]), "+OK") {
+		t.Fatalf("PING reply = %q, %v", buf[:n], err)
+	}
+
+	// Raise the cap on the running server; the already-accepted connection
+	// must pick it up (this 28-byte command was over the old cap).
+	s.SetMaxCommandSize(200)
+	if _, err := conn.Write([]byte("*3\r\n$2\r\nab\r\n$2\r\ncd\r\n$2\r\nef\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("reading reply after raising the cap: %v", err)
+	}
+	if !strings.HasPrefix(string(buf[:n]), "+OK") {
+		t.Fatalf("expected +OK after raising the cap on a live connection, got %q", buf[:n])
+	}
+}
+
+// TestServerMaxBulkSizePropagatesToActiveConn is the same guarantee for the
+// per-bulk cap.
+func TestServerMaxBulkSizePropagatesToActiveConn(t *testing.T) {
+	s := NewServer("", func(conn Conn, cmd Command) { conn.WriteString("OK") }, nil, nil)
+	s.SetMaxBulkSize(5)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = s.Serve(ln) }()
+	defer s.Close()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("PING\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 256)
+	if n, err := conn.Read(buf); err != nil || !strings.HasPrefix(string(buf[:n]), "+OK") {
+		t.Fatalf("PING reply = %q, %v", buf[:n], err)
+	}
+
+	// Raise the per-bulk cap; a 20-byte bulk that was over the old 5-byte cap
+	// must now be accepted on the same connection.
+	s.SetMaxBulkSize(100)
+	payload := strings.Repeat("x", 20)
+	if _, err := conn.Write([]byte("*2\r\n$3\r\nGET\r\n$20\r\n" + payload + "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("reading reply after raising the bulk cap: %v", err)
+	}
+	if !strings.HasPrefix(string(buf[:n]), "+OK") {
+		t.Fatalf("expected +OK after raising the bulk cap on a live connection, got %q", buf[:n])
+	}
+}
+
 func TestParse(t *testing.T) {
 	_, err := Parse(nil)
 	if err != errIncompleteCommand {
